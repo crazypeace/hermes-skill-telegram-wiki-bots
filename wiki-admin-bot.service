@@ -1,0 +1,15 @@
+[Unit]
+Description=Wiki Admin Bot - Telegram wiki ingestion bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root
+ExecStart=/usr/bin/python3 /root/wiki_admin_bot.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/wiki_admin_bot.log
+StandardError=append:/root/wiki_admin_bot.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Wiki Bot  - Telegram wiki query bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root
+ExecStart=/usr/bin/python3 /root/wiki_bot.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/wiki_bot.log
+StandardError=append:/root/wiki_bot.log
+
+[Install]
+WantedBy=multi-user.target
