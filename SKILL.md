@@ -91,7 +91,7 @@ BOT_TOKEN = "your-query-bot-token"
 API_URL = "http://127.0.0.1:8642/v1/chat/completions"
 OUTPUT_DIR = Path("/root/wiki_bot_output")  # .md files saved here
 POLL_TIMEOUT = 30
-REQUEST_TIMEOUT = 120  # seconds
+REQUEST_TIMEOUT = 300  # seconds
 ```
 
 ### Registered Commands
