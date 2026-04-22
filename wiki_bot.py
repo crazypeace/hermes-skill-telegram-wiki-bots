@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # ─── Config ───────────────────────────────────────────────────────────
-BOT_TOKEN="8752294555:AAHbNSEABE3ji_Cmc58D1LLGLc4cWp6aBYg"
+BOT_TOKEN="1234567890:AAHkMpXv2nQrWsYd8bJtLfCeUo9GiN1KmZw"
 API_URL = "http://127.0.0.1:8642/v1/chat/completions"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
