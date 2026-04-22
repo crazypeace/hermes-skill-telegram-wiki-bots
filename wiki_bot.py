@@ -12,11 +12,13 @@ import re
 import sys
 import signal
 import os
+import fcntl
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 # ─── Config ───────────────────────────────────────────────────────────
-BOT_TOKEN = "1234567890:AAHkMpXv2nQrWsYd8bJtLfCeUo9GiN1KmZw"
+BOT_TOKEN="8752294555:AAHbNSEABE3ji_Cmc58D1LLGLc4cWp6aBYg"
 API_URL = "http://127.0.0.1:8642/v1/chat/completions"
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -29,11 +31,16 @@ OUTPUT_DIR = Path("/root/wiki_bot_output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 POLL_TIMEOUT = 30  # seconds
-REQUEST_TIMEOUT = 120  # seconds for API calls
+
+# 线程池和全局锁（用于串行化 wiki 操作）
+MAX_WORKERS = 1
+executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+is_processing = False  # True 表示正在处理一个 query
+REQUEST_TIMEOUT = 300  # seconds for API calls
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("wiki_bot")
@@ -131,7 +138,11 @@ def send_chat_action(chat_id: int, action: str = "typing", thread_id: int = None
 
 
 def react_to_message(chat_id: int, message_id: int, emoji: str = "👀"):
-    """React to a message with an emoji."""
+    """React to a message with an emoji.
+    
+    Only certain emojis are valid Telegram reactions.
+    Common valid ones: 👍 👎 ❤️ 🔥 🎉 😱 😢 🤔 😍 🤡 💩 🥳 🤷 👀 
+    """
     data = {
         "chat_id": chat_id,
         "message_id": message_id,
@@ -200,9 +211,10 @@ def extract_query(msg: dict) -> str:
 
 def query_wiki(query: str) -> str:
     """Send query to the LLM wiki via API server."""
+
     payload = {
         "messages": [
-            {"role": "system", "content": "你是一个 wiki 查询助手。只回答用户的问题，不要建议创建 wiki 页面、更新 index 或修改任何文件。回答结束后直接停止。"},
+            {"role": "system", "content": "你是一个 wiki 查询助手。只回答用户的问题，不要建议创建 wiki 页面、更新 index 或修改任何文件。使用 Wiki 内容完整回答用户问题，不要出现'请参考...'或'基于...页面'这类引导式语句。直接给出自包含的完整答案，必要时将引用内容自然地融入答案中。回答结束后停止。"},
             {"role": "user", "content": f"/llm-wiki query {query}"}
         ]
     }
@@ -330,6 +342,9 @@ def format_for_telegram(text: str) -> str:
 # ─── Main loop ────────────────────────────────────────────────────────
 
 def main():
+    # 用于跟踪待处理的异步任务
+    pending_futures = {}  # future -> (chat_id, msg_id, query)
+
     global BOT_USERNAME, BOT_ID
 
     # Get bot info
@@ -363,10 +378,39 @@ def main():
     log.info("Listening for messages...")
 
     while running:
+        global is_processing
+
         try:
+            # 1. 长轮询获取 updates（同步阻塞 0-30s）
             updates = get_updates(offset)
+
+            # 2. 先检查并处理已完成的 futures（解锁以便接受新消息）
+            done_futures = [f for f in pending_futures if f.done()]
+            for f in done_futures:
+                chat_id, msg_id, query, thread_id = pending_futures.pop(f)
+                try:
+                    answer = f.result()
+                    md_path = save_markdown(query, answer)
+                    formatted = format_for_telegram(answer)
+                    result = send_message(chat_id, formatted, reply_to=msg_id, thread_id=thread_id)
+                    if not result.get("ok"):
+                        log.warning("HTML send failed, retrying as plain text")
+                        plain = answer[:4000] + ("\n...(回复过长，已截断)" if len(answer) > 4000 else "")
+                        send_message(chat_id, plain, reply_to=msg_id, thread_id=thread_id, parse_mode=None)
+                    send_document(chat_id, md_path, reply_to=msg_id, thread_id=thread_id)
+                    log.info("Replied to chat %s (%d chars)", chat_id, len(formatted))
+                except Exception as e:
+                    log.error("Query failed for chat %s: %s", chat_id, e, exc_info=True)
+                    send_message(chat_id, f"❌ 查询处理失败: {e}", reply_to=msg_id, thread_id=thread_id)
+                finally:
+                    is_processing = False
+
+            # 3. 遍历所有收到的 updates
             for update in updates:
-                offset = update["update_id"] + 1
+                # 关键：始终推进 offset，无论 reject 还是 accept
+                update_id = update.get("update_id")
+                if update_id is not None:
+                    offset = update_id + 1
 
                 msg = update.get("message") or update.get("channel_post")
                 if not msg:
@@ -385,42 +429,31 @@ def main():
                                  reply_to=msg_id, thread_id=thread_id)
                     continue
 
-                log.info("Query from chat %s: %s", chat_id, query[:80])
+                # 忙状态检查：react 后直接跳过（offset 已推进，不会重复）
+                if is_processing:
+                    react_to_message(chat_id, msg_id, emoji="🙈")
+                    log.info("Rejected query from chat %s (busy): %s", chat_id, query[:50])
+                    continue
 
-                # React to message
-                react_to_message(chat_id, msg_id)
+                # 空闲：加锁，提交异步任务
+                is_processing = True
+                log.info("Accepted query from chat %s: %s", chat_id, query[:50])
 
-                # Show typing
+                # 提交任务到线程池（非阻塞）
+                future = executor.submit(query_wiki, query)
+                pending_futures[future] = (chat_id, msg_id, query, thread_id)
+
+                # React 👀 表示已接受
+                react_to_message(chat_id, msg_id, emoji="👀")
                 send_chat_action(chat_id, thread_id=thread_id)
 
-                # Query wiki
-                answer = query_wiki(query)
-
-                # Save as .md file
-                md_path = save_markdown(query, answer)
-                log.info("Saved .md to %s", md_path)
-
-                # Format and send text message
-                formatted = format_for_telegram(answer)
-                result = send_message(chat_id, formatted, reply_to=msg_id, thread_id=thread_id)
-                if not result.get("ok"):
-                    # Fallback: send as plain text (no parse_mode) if HTML fails
-                    log.warning("HTML send failed, retrying as plain text")
-                    plain = answer[:4000] + ("\n...(回复过长，已截断)" if len(answer) > 4000 else "")
-                    send_message(chat_id, plain, reply_to=msg_id, thread_id=thread_id, parse_mode=None)
-
-                # Send .md file as document
-                send_document(chat_id, md_path, reply_to=msg_id, thread_id=thread_id)
-
-                log.info("Replied to chat %s (%d chars) + .md", chat_id, len(formatted))
 
         except requests.exceptions.ConnectionError:
             log.warning("Connection lost, retrying in 5s...")
             time.sleep(5)
         except Exception as e:
-            log.error("Unexpected error: %s", e)
+            log.error("Unexpected error in main loop: %s", e, exc_info=True)
             time.sleep(2)
-
 
 if __name__ == "__main__":
     main()
