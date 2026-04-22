@@ -49,7 +49,7 @@ Two Telegram bots serving as a user-facing frontend to the [LLM Wiki](https://gi
 1. React with 👀 to acknowledge the message
 2. Show typing indicator
 3. Send query to API: `/llm_wiki query <question>`
-4. System prompt constrains: "只回答用户的问题，不要建议创建 wiki 页面、更新 index 或修改任何文件"
+4. System prompt constrains: "你是一个 wiki 查询助手。只回答用户的问题，不要建议创建 wiki 页面、更新 index 或修改任何文件。使用 Wiki 内容完整回答用户问题，不要出现'请参考...'或'基于...页面'这类引导式语句。直接给出自包含的完整答案，必要时将引用内容自然地融入答案中。回答结束后停止。"
 5. Save answer as timestamped `.md` file in `OUTPUT_DIR`
 6. Format answer as Telegram HTML and send
 7. Send `.md` file as document attachment
