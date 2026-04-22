@@ -7,7 +7,7 @@ metadata:
   hermes:
     tags: [telegram, wiki, bot, knowledge-base, long-polling]
     category: telegram-bots
-    related_skills: [llm-wiki, telegram-html-formatting]
+    related_skills: [llm-wiki]
 ---
 
 # Telegram Wiki Bots
